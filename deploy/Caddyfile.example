@@ -1,0 +1,37 @@
+# Reverse proxy Caddy pour dsh — mode « domaine public ».
+# Destination : /etc/caddy/Caddyfile
+#
+# Caddy obtient et renouvelle le certificat TLS tout seul, et transmet l'en-tête
+# Host d'origine à l'amont par défaut — c'est exactement ce dont le pare-feu
+# applicatif /api de dsh a besoin.
+#
+# À faire des deux côtés :
+#   1. remplacer le domaine ci-dessous ;
+#   2. générer le hash du mot de passe avec `caddy hash-password` ;
+#   3. déclarer le même domaine à dsh via --trusted-host dans service.env,
+#      sinon toutes les requêtes /api répondront 403.
+
+dsh.votre-domaine.fr {
+	encode zstd gzip
+
+	# Authentification : dsh n'en fournit aucune, c'est donc ici la seule
+	# barrière entre Internet et un agent qui exécute bash sur ce serveur.
+	#
+	# Directive `basic_auth` sur Caddy >= 2.8 ; sur les versions antérieures
+	# elle s'appelle `basicauth`. `caddy version` pour trancher.
+	basic_auth {
+		# <utilisateur> <hash bcrypt produit par `caddy hash-password`>
+		dsh $2a$14$REMPLACEZ.PAR.VOTRE.HASH.BCRYPT.GENERE.PAR.CADDY
+	}
+
+	reverse_proxy 127.0.0.1:3080 {
+		# Désactive la mise en tampon des réponses : les tours de l'agent sont
+		# diffusés en flux, et un tampon les ferait apparaître d'un bloc.
+		flush_interval -1
+
+		# Les WebSockets descendants (events.mux, events.host) sont pris en
+		# charge nativement, sans directive supplémentaire. Le transport HTTP
+		# de Caddy n'impose aucun délai de lecture par défaut, ce qui convient
+		# aux tours longs.
+	}
+}

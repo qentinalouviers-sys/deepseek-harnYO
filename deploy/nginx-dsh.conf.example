@@ -1,0 +1,76 @@
+# Reverse proxy nginx pour dsh — alternative à Caddy.
+# Destination : /etc/nginx/sites-available/dsh, puis lien dans sites-enabled/.
+#
+# Certificat : sudo certbot --nginx -d dsh.votre-domaine.fr
+# Mot de passe : sudo htpasswd -c /etc/nginx/.htpasswd-dsh dsh
+#
+# Déclarez le même domaine à dsh via --trusted-host dans service.env, sinon
+# toutes les requêtes /api répondront 403.
+
+# Bascule de l'en-tête Connection selon la présence d'un Upgrade : indispensable
+# aux WebSockets descendants de dsh (events.mux, events.host). À placer dans le
+# contexte http, donc hors de tout bloc server.
+map $http_upgrade $connection_upgrade {
+	default upgrade;
+	''      close;
+}
+
+server {
+	listen 80;
+	listen [::]:80;
+	server_name dsh.votre-domaine.fr;
+	return 301 https://$host$request_uri;
+}
+
+server {
+	listen 443 ssl;
+	listen [::]:443 ssl;
+	http2 on;
+	server_name dsh.votre-domaine.fr;
+
+	ssl_certificate     /etc/letsencrypt/live/dsh.votre-domaine.fr/fullchain.pem;
+	ssl_certificate_key /etc/letsencrypt/live/dsh.votre-domaine.fr/privkey.pem;
+
+	# dsh ne fournit aucune authentification : c'est ici la seule barrière entre
+	# Internet et un agent qui exécute bash sur ce serveur.
+	auth_basic           "dsh";
+	auth_basic_user_file /etc/nginx/.htpasswd-dsh;
+
+	# Pièces jointes (images) envoyées au modèle.
+	client_max_body_size 64m;
+
+	location / {
+		proxy_pass http://127.0.0.1:3080;
+		proxy_http_version 1.1;
+
+		# $http_host, et non $host : il conserve le port quand le service est
+		# servi ailleurs que sur 443. Le pare-feu /api de dsh compare cet
+		# en-tête à ses --trusted-host, et compare l'Origin du navigateur à
+		# cette même autorité — d'où la règle suivante.
+		proxy_set_header Host $http_host;
+
+		# Ne réécrivez PAS l'en-tête Origin : dsh exige qu'il corresponde
+		# exactement à l'autorité du Host. Le laisser intact suffit.
+
+		proxy_set_header Upgrade           $http_upgrade;
+		proxy_set_header Connection        $connection_upgrade;
+		proxy_set_header X-Real-IP         $remote_addr;
+		proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+		proxy_set_header X-Forwarded-Proto $scheme;
+
+		# Les tours de l'agent sont diffusés en flux : sans cela nginx les
+		# accumule et l'interface semble figée jusqu'à la fin de la réponse.
+		proxy_buffering off;
+		proxy_cache     off;
+
+		# Un tour d'agent peut durer plusieurs minutes.
+		proxy_read_timeout 3600s;
+		proxy_send_timeout 3600s;
+	}
+}
+
+# Note : avec auth_basic, le navigateur rejoue les identifiants mis en cache sur
+# la poignée de main WebSocket de la même origine. Si votre navigateur ne le
+# fait pas et que l'interface reste figée après connexion, remplacez
+# l'authentification basique par un portail devant le proxy (Authelia,
+# oauth2-proxy) ou passez en accès Tailscale.

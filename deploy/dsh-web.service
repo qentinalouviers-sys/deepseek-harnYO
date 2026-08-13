@@ -1,0 +1,54 @@
+[Unit]
+Description=DeepSeek Harness Web UI (dsh web)
+Documentation=https://github.com/deepseek-ai/deepseek-harness
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dsh
+Group=dsh
+
+# Le répertoire de travail est la racine de workspace par défaut de l'agent.
+WorkingDirectory=/home/dsh/workspace
+
+Environment=NODE_ENV=production
+Environment=HOME=/home/dsh
+Environment=DSH_HOME=/home/dsh/.dsh
+Environment=DSH_PORT=3080
+Environment=DSH_EXTRA_ARGS=
+
+# Surcharge les valeurs ci-dessus ; le "-" tolère l'absence du fichier.
+EnvironmentFile=-/home/dsh/.dsh/service.env
+
+# $DSH_EXTRA_ARGS (sans accolades) est découpé sur les espaces par systemd,
+# ce qui permet d'y placer plusieurs flags, par exemple --trusted-host.
+ExecStart=/usr/bin/node /opt/dsh/deepseek-harness/apps/cli/lib/bin.js web --port ${DSH_PORT} $DSH_EXTRA_ARGS
+
+Restart=on-failure
+RestartSec=5
+
+# dsh accorde 5 s à son arbre de plugins pour se démonter, et SIGTERM sort en 0.
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dsh-web
+
+# --- Durcissement ---
+# no_new_privs est aussi la précondition du sandbox Landlock utilisé par les outils.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+# Ne PAS ajouter ProtectHome : l'agent écrit dans son workspace et dans $DSH_HOME.
+# Ne PAS ajouter MemoryDenyWriteExecute : cela casserait le JIT de V8.
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,43 @@
+# Document de settings de dsh.
+# Destination : $DSH_HOME/settings.yaml — soit /home/dsh/.dsh/settings.yaml
+#
+# Un seul document porte toutes les sections, chacune nommée par l'espace de nom
+# du plugin qui la possède. Ce fichier se superpose aux valeurs de composition :
+# une clé absente ici ne peut pas écraser une clé présente dans la composition.
+#
+# Les éditions externes sont publiées à chaud. En revanche un document présent
+# mais invalide fait échouer le démarrage : c'est volontaire, une section
+# ignorée silencieusement se lirait comme « ma configuration n'a aucun effet ».
+#
+# Ce fichier n'est nécessaire que pour changer les valeurs par défaut, ou pour
+# configurer un fournisseur en accès distant, où la page Settings est refusée
+# (voir README.md §7). En accès par tunnel SSH, l'UI écrit ici pour vous.
+
+# --- Modèle par défaut des nouvelles sessions ---
+# Valeurs livrées par la composition de base ; recopiées ici pour l'exemple.
+agent-default-model:
+  provider: deepseek-official
+  model: deepseek-v4-flash
+  # reasoningEffort: high     # off | high | max ; omis ⇒ high
+
+# --- Fournisseurs supplémentaires (adaptateur pi-ai) ---
+# Décommentez et adaptez pour une passerelle d'entreprise ou un endpoint
+# compatible OpenAI. `apiKeyEnv` nomme la référence de credential à résoudre :
+# c'est la clé à placer dans .credentials.yaml, pas la valeur du secret.
+#
+#llm-pi-ai:
+#  providers:
+#    ma-passerelle:
+#      apiKeyEnv: GATEWAY_API_KEY
+#      api: openai-completions
+#      baseURL: https://gateway.example/v1
+#      # defaultInput s'applique aux modèles que le catalogue ne décrit pas.
+#      # C'est un repli, pas une surcharge ; par défaut [text].
+#      defaultInput: [text]
+#      models:
+#        - id: legacy-chat
+#        - id: vision-preview
+#          # Un modèle saisi à la main est considéré texte seul tant qu'il ne
+#          # déclare pas l'inverse : rien ne permet de demander à un endpoint
+#          # quelles modalités il accepte.
+#          input: [text, image]
