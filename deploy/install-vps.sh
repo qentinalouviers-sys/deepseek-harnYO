@@ -68,9 +68,6 @@ else
 	apt-get install -y nodejs
 fi
 
-log "Activation de corepack (pnpm)"
-corepack enable
-
 # --- 3. Swap si la RAM est juste -----------------------------------------
 # Le build compile tout le monorepo TypeScript ; sous 4 Go sans swap il se fait
 # tuer par l'OOM killer.
@@ -112,11 +109,44 @@ else
 	sudo -u "$DSH_USER" -H git clone --branch "$DSH_REF" "$DSH_REPO_URL" "$CHECKOUT"
 fi
 
-# --- 6. Dépendances et build ---------------------------------------------
+# --- 6. pnpm --------------------------------------------------------------
+# La version est lue depuis le champ `packageManager` du dépôt, donc elle suit
+# le pin du projet sans être recopiée ici.
+#
+# corepack n'est PAS toujours présent : Node l'a dégroupé, et le paquet `nodejs`
+# d'Ubuntu ne le livre pas. On retombe alors sur une installation directe de
+# pnpm à la version épinglée, ce qui donne le même résultat.
+PNPM_PIN="$(node -p "((require('${CHECKOUT}/package.json').packageManager)||'pnpm@11.7.0').split('@').pop()")"
+
+if command -v corepack >/dev/null 2>&1; then
+	log "Activation de pnpm ${PNPM_PIN} via corepack"
+	corepack enable
+	COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack prepare "pnpm@${PNPM_PIN}" --activate
+elif command -v pnpm >/dev/null 2>&1; then
+	log "pnpm $(pnpm -v) déjà présent"
+else
+	# Archive du registre npm plutôt que `apt-get install npm` : sur Ubuntu
+	# récent ce paquet peut tirer sa propre version de Node et entrer en conflit
+	# avec celle déjà installée. pnpm est distribué en JavaScript pur, donc
+	# l'archive convient à toutes les architectures.
+	log "corepack absent — installation de pnpm ${PNPM_PIN} depuis le registre npm"
+	pnpm_tmp="$(mktemp -d)"
+	curl -fsSL "https://registry.npmjs.org/pnpm/-/pnpm-${PNPM_PIN}.tgz" -o "${pnpm_tmp}/pnpm.tgz" \
+		|| die "téléchargement de pnpm ${PNPM_PIN} échoué"
+	rm -rf /usr/local/lib/pnpm
+	mkdir -p /usr/local/lib/pnpm
+	tar -xzf "${pnpm_tmp}/pnpm.tgz" -C /usr/local/lib/pnpm --strip-components=1
+	rm -rf "$pnpm_tmp"
+	chmod +x /usr/local/lib/pnpm/bin/pnpm.mjs
+	ln -sf /usr/local/lib/pnpm/bin/pnpm.mjs /usr/local/bin/pnpm
+fi
+
+command -v pnpm >/dev/null 2>&1 || die "pnpm introuvable après installation"
+log "pnpm utilisé : $(pnpm -v)"
+
+# --- 7. Dépendances et build ---------------------------------------------
 # `pnpm run build` est obligatoire : le runner web de production a besoin des
-# artefacts de paquets ET du bundle frontend. Comptez 5 à 15 minutes.
-# COREPACK_ENABLE_DOWNLOAD_PROMPT=0 : corepack télécharge la version de pnpm
-# épinglée par le dépôt sans attendre une confirmation interactive.
+# artefacts de paquets ET du bundle frontend. Comptez 5 à 20 minutes.
 run_as_dsh() { sudo -u "$DSH_USER" -H env COREPACK_ENABLE_DOWNLOAD_PROMPT=0 bash -lc "$1"; }
 
 log "Installation des dépendances (pnpm install)"
@@ -127,7 +157,7 @@ run_as_dsh "cd '$CHECKOUT' && pnpm run build"
 
 [ -f "${CHECKOUT}/apps/cli/lib/bin.js" ] || die "build incomplet : apps/cli/lib/bin.js absent"
 
-# --- 7. Configuration du service -----------------------------------------
+# --- 8. Configuration du service -----------------------------------------
 if [ ! -f "${DSH_HOME_DIR}/service.env" ]; then
 	log "Création de ${DSH_HOME_DIR}/service.env"
 	install -o "$DSH_USER" -g "$DSH_USER" -m 600 \
@@ -160,7 +190,7 @@ if ! systemctl is-active --quiet dsh-web; then
 	die "démarrage échoué"
 fi
 
-# --- 8. Résumé ------------------------------------------------------------
+# --- 9. Résumé ------------------------------------------------------------
 cat <<EOF
 
 $(log "Installation terminée")
