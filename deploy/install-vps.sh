@@ -49,26 +49,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y --no-install-recommends ca-certificates curl git build-essential python3
 
-# --- 2. Node.js -----------------------------------------------------------
-# dsh exige ^22.19 || >=24.
-node_ok=0
-if command -v node >/dev/null; then
-	major="$(node -p 'process.versions.node.split(".")[0]')"
-	minor="$(node -p 'process.versions.node.split(".")[1]')"
-	if { [ "$major" -eq 22 ] && [ "$minor" -ge 19 ]; } || [ "$major" -ge 24 ]; then
-		node_ok=1
-	fi
-fi
-
-if [ "$node_ok" -eq 1 ]; then
-	log "Node.js $(node -v) convient"
-else
-	log "Installation de Node.js ${NODE_MAJOR}.x"
-	curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash -
-	apt-get install -y nodejs
-fi
-
-# --- 3. Swap si la RAM est juste -----------------------------------------
+# --- 2. Swap si la RAM est juste -----------------------------------------
 # Le build compile tout le monorepo TypeScript ; sous 4 Go sans swap il se fait
 # tuer par l'OOM killer.
 mem_mb="$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)"
@@ -84,7 +65,7 @@ if [ "$DSH_SKIP_SWAP" != "1" ] && [ "$mem_mb" -lt 3500 ] && [ "$swap_mb" -lt 102
 	grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >>/etc/fstab
 fi
 
-# --- 4. Utilisateur dédié -------------------------------------------------
+# --- 3. Utilisateur dédié -------------------------------------------------
 # L'agent exécute du code arbitraire sous cette identité : ne mettez rien
 # d'autre de sensible sur ce compte.
 if id -u "$DSH_USER" >/dev/null 2>&1; then
@@ -97,6 +78,56 @@ fi
 install -d -o "$DSH_USER" -g "$DSH_USER" -m 755 "$DSH_USER_HOME" "$WORKSPACE"
 install -d -o "$DSH_USER" -g "$DSH_USER" -m 700 "$DSH_HOME_DIR"
 install -d -o "$DSH_USER" -g "$DSH_USER" -m 755 "$DSH_PREFIX"
+
+# --- 4. Node.js -----------------------------------------------------------
+# dsh exige ^22.19 || >=24. La version ne suffit pas : le service tourne sous
+# $DSH_USER, donc c'est SON accès qui décide. Un Node installé dans le home
+# d'un autre compte (nvm, .hermes, fnm) est invisible à root près, et le
+# service échouerait au démarrage.
+#
+SYS_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Un candidat convient s'il satisfait la plage de versions ET si $DSH_USER peut
+# l'exécuter. Un Node sous /home/<autre>/... échoue ici même si root le lance.
+node_ok_for_service() {
+	[ -n "${1:-}" ] || return 1
+	sudo -u "$DSH_USER" -H "$1" -e '
+		const [maj, min] = process.versions.node.split(".").map(Number)
+		process.exit((maj === 22 && min >= 19) || maj >= 24 ? 0 : 1)
+	' >/dev/null 2>&1
+}
+
+# Le PATH système d'abord (c'est celui que verra systemd), puis le node de root,
+# qui peut vivre ailleurs — /opt/... est légitime, un home ne l'est pas.
+NODE_BIN=''
+for candidate in \
+	"$(sudo -u "$DSH_USER" -H env PATH="$SYS_PATH" bash -c 'command -v node' 2>/dev/null || true)" \
+	"$(command -v node 2>/dev/null || true)"
+do
+	if node_ok_for_service "$candidate"; then
+		NODE_BIN="$candidate"
+		break
+	fi
+done
+
+if [ -z "$NODE_BIN" ]; then
+	log "Node absent ou inaccessible à ${DSH_USER} — installation système de Node ${NODE_MAJOR}.x"
+	curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash -
+	apt-get install -y nodejs
+	NODE_BIN="$(sudo -u "$DSH_USER" -H env PATH="$SYS_PATH" bash -c 'command -v node' 2>/dev/null || true)"
+	node_ok_for_service "$NODE_BIN" || die "Node toujours inaccessible à ${DSH_USER} après installation"
+fi
+
+log "Node du service : ${NODE_BIN} ($(sudo -u "$DSH_USER" -H "$NODE_BIN" -v))"
+
+# Le répertoire de node rejoint le PATH des commandes lancées sous $DSH_USER :
+# le shebang `#!/usr/bin/env node` de pnpm doit le trouver.
+RUN_PATH="$(dirname "$NODE_BIN"):${SYS_PATH}"
+
+# `bash -c` et non `-lc` : sourcer les profils réintroduirait un Node de home.
+run_as_dsh() {
+	sudo -u "$DSH_USER" -H env PATH="$RUN_PATH" COREPACK_ENABLE_DOWNLOAD_PROMPT=0 bash -c "$1"
+}
 
 # --- 5. Clone ou mise à jour ---------------------------------------------
 if [ -d "${CHECKOUT}/.git" ]; then
@@ -116,7 +147,7 @@ fi
 # corepack n'est PAS toujours présent : Node l'a dégroupé, et le paquet `nodejs`
 # d'Ubuntu ne le livre pas. On retombe alors sur une installation directe de
 # pnpm à la version épinglée, ce qui donne le même résultat.
-PNPM_PIN="$(node -p "((require('${CHECKOUT}/package.json').packageManager)||'pnpm@11.7.0').split('@').pop()")"
+PNPM_PIN="$("$NODE_BIN" -p "((require('${CHECKOUT}/package.json').packageManager)||'pnpm@11.7.0').split('@').pop()")"
 
 if command -v corepack >/dev/null 2>&1; then
 	log "Activation de pnpm ${PNPM_PIN} via corepack"
@@ -141,13 +172,15 @@ else
 	ln -sf /usr/local/lib/pnpm/bin/pnpm.mjs /usr/local/bin/pnpm
 fi
 
-command -v pnpm >/dev/null 2>&1 || die "pnpm introuvable après installation"
-log "pnpm utilisé : $(pnpm -v)"
+# Vérifié sous l'identité du service, avec le PATH système : c'est ce couple
+# qui exécutera réellement le build.
+pnpm_version="$(run_as_dsh 'pnpm --version' 2>/dev/null)" \
+	|| die "pnpm inutilisable par ${DSH_USER} (PATH système)"
+log "pnpm utilisé par ${DSH_USER} : ${pnpm_version}"
 
 # --- 7. Dépendances et build ---------------------------------------------
 # `pnpm run build` est obligatoire : le runner web de production a besoin des
 # artefacts de paquets ET du bundle frontend. Comptez 5 à 20 minutes.
-run_as_dsh() { sudo -u "$DSH_USER" -H env COREPACK_ENABLE_DOWNLOAD_PROMPT=0 bash -lc "$1"; }
 
 log "Installation des dépendances (pnpm install)"
 run_as_dsh "cd '$CHECKOUT' && pnpm install --frozen-lockfile"
@@ -176,7 +209,7 @@ sed -e "s#^User=.*#User=${DSH_USER}#" \
 	-e "s#Environment=DSH_HOME=.*#Environment=DSH_HOME=${DSH_HOME_DIR}#" \
 	-e "s#^EnvironmentFile=.*#EnvironmentFile=-${DSH_HOME_DIR}/service.env#" \
 	-e "s#/opt/dsh/deepseek-harness#${CHECKOUT}#" \
-	-e "s#^ExecStart=/usr/bin/node#ExecStart=$(command -v node)#" \
+	-e "s#^ExecStart=/usr/bin/node#ExecStart=${NODE_BIN}#" \
 	"${CHECKOUT}/deploy/dsh-web.service" >"$unit"
 
 systemctl daemon-reload
