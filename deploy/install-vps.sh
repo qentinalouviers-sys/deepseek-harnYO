@@ -144,38 +144,39 @@ fi
 # La version est lue depuis le champ `packageManager` du dépôt, donc elle suit
 # le pin du projet sans être recopiée ici.
 #
-# corepack n'est PAS toujours présent : Node l'a dégroupé, et le paquet `nodejs`
-# d'Ubuntu ne le livre pas. On retombe alors sur une installation directe de
-# pnpm à la version épinglée, ce qui donne le même résultat.
+# corepack est délibérément écarté : `corepack prepare` dépose sa copie de pnpm
+# dans le cache de l'utilisateur qui l'exécute, donc une activation par root
+# reste inutilisable par le compte de service. L'archive du registre npm est
+# installée une fois pour toutes sous /usr/local, lisible par tous, et pnpm
+# étant du JavaScript pur, elle convient à toutes les architectures.
+#
+# `apt-get install npm` est également écarté : sur Ubuntu récent ce paquet peut
+# tirer sa propre version de Node et entrer en conflit avec celle installée.
 PNPM_PIN="$("$NODE_BIN" -p "((require('${CHECKOUT}/package.json').packageManager)||'pnpm@11.7.0').split('@').pop()")"
 
-if command -v corepack >/dev/null 2>&1; then
-	log "Activation de pnpm ${PNPM_PIN} via corepack"
-	corepack enable
-	COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack prepare "pnpm@${PNPM_PIN}" --activate
-elif command -v pnpm >/dev/null 2>&1; then
-	log "pnpm $(pnpm -v) déjà présent"
-else
-	# Archive du registre npm plutôt que `apt-get install npm` : sur Ubuntu
-	# récent ce paquet peut tirer sa propre version de Node et entrer en conflit
-	# avec celle déjà installée. pnpm est distribué en JavaScript pur, donc
-	# l'archive convient à toutes les architectures.
-	log "corepack absent — installation de pnpm ${PNPM_PIN} depuis le registre npm"
-	pnpm_tmp="$(mktemp -d)"
-	curl -fsSL "https://registry.npmjs.org/pnpm/-/pnpm-${PNPM_PIN}.tgz" -o "${pnpm_tmp}/pnpm.tgz" \
-		|| die "téléchargement de pnpm ${PNPM_PIN} échoué"
-	rm -rf /usr/local/lib/pnpm
-	mkdir -p /usr/local/lib/pnpm
-	tar -xzf "${pnpm_tmp}/pnpm.tgz" -C /usr/local/lib/pnpm --strip-components=1
-	rm -rf "$pnpm_tmp"
-	chmod +x /usr/local/lib/pnpm/bin/pnpm.mjs
-	ln -sf /usr/local/lib/pnpm/bin/pnpm.mjs /usr/local/bin/pnpm
-fi
+log "Installation de pnpm ${PNPM_PIN} depuis le registre npm"
+pnpm_tmp="$(mktemp -d)"
+curl -fsSL "https://registry.npmjs.org/pnpm/-/pnpm-${PNPM_PIN}.tgz" -o "${pnpm_tmp}/pnpm.tgz" \
+	|| die "téléchargement de pnpm ${PNPM_PIN} échoué"
+rm -rf /usr/local/lib/pnpm
+mkdir -p /usr/local/lib/pnpm
+tar -xzf "${pnpm_tmp}/pnpm.tgz" -C /usr/local/lib/pnpm --strip-components=1
+rm -rf "$pnpm_tmp"
+chmod -R a+rX /usr/local/lib/pnpm
+chmod 755 /usr/local/lib/pnpm/bin/pnpm.mjs
+ln -sf /usr/local/lib/pnpm/bin/pnpm.mjs /usr/local/bin/pnpm
 
-# Vérifié sous l'identité du service, avec le PATH système : c'est ce couple
-# qui exécutera réellement le build.
-pnpm_version="$(run_as_dsh 'pnpm --version' 2>/dev/null)" \
-	|| die "pnpm inutilisable par ${DSH_USER} (PATH système)"
+# Invocation par chemin absolu, jamais par le PATH : un autre pnpm placé plus
+# tôt (shim corepack, installation globale) le masquerait, et un shim de
+# version différente tenterait de retélécharger le pin par le réseau.
+PNPM_RUN="'${NODE_BIN}' /usr/local/lib/pnpm/bin/pnpm.mjs"
+
+# Vérifié sous l'identité du service : c'est ce couple qui exécutera le build.
+# L'erreur de pnpm n'est pas masquée — elle est la seule information utile si
+# cette vérification échoue.
+if ! pnpm_version="$(run_as_dsh "${PNPM_RUN} --version")"; then
+	die "pnpm inutilisable par ${DSH_USER} — voir l'erreur ci-dessus"
+fi
 log "pnpm utilisé par ${DSH_USER} : ${pnpm_version}"
 
 # --- 7. Dépendances et build ---------------------------------------------
@@ -183,10 +184,10 @@ log "pnpm utilisé par ${DSH_USER} : ${pnpm_version}"
 # artefacts de paquets ET du bundle frontend. Comptez 5 à 20 minutes.
 
 log "Installation des dépendances (pnpm install)"
-run_as_dsh "cd '$CHECKOUT' && pnpm install --frozen-lockfile"
+run_as_dsh "cd '$CHECKOUT' && ${PNPM_RUN} install --frozen-lockfile"
 
 log "Build (pnpm run build) — patientez"
-run_as_dsh "cd '$CHECKOUT' && pnpm run build"
+run_as_dsh "cd '$CHECKOUT' && ${PNPM_RUN} run build"
 
 [ -f "${CHECKOUT}/apps/cli/lib/bin.js" ] || die "build incomplet : apps/cli/lib/bin.js absent"
 
