@@ -125,8 +125,14 @@ log "Node du service : ${NODE_BIN} ($(sudo -u "$DSH_USER" -H "$NODE_BIN" -v))"
 RUN_PATH="$(dirname "$NODE_BIN"):${SYS_PATH}"
 
 # `bash -c` et non `-lc` : sourcer les profils réintroduirait un Node de home.
+#
+# Le répertoire courant est forcé sur le home du service : sans cela la commande
+# hérite du répertoire d'invocation du script — typiquement le home de
+# l'administrateur, que $DSH_USER ne peut pas lire — et pnpm, qui remonte
+# l'arborescence à la recherche d'un workspace, échoue en EACCES.
 run_as_dsh() {
-	sudo -u "$DSH_USER" -H env PATH="$RUN_PATH" COREPACK_ENABLE_DOWNLOAD_PROMPT=0 bash -c "$1"
+	sudo -u "$DSH_USER" -H env PATH="$RUN_PATH" COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+		bash -c "cd '${DSH_USER_HOME}' && $1"
 }
 
 # --- 5. Clone ou mise à jour ---------------------------------------------
